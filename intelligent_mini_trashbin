@@ -1,0 +1,379 @@
+#include "edp.c"
+#include <SoftwareSerial.h>
+
+#define KEY  "AvFazE=JSZb90nhhM8GzFVkyvAI="    //APIkey 
+#define ID   "505338039"                          //设备ID
+#define PUSH_ID NULL
+
+// 串口
+#define _baudrate   9600
+#define _rxpin      11
+#define _txpin      12
+#define WIFI_UART   mySerial
+#define DBG_UART    Serial   //调试打印串口
+
+SoftwareSerial mySerial(_rxpin, _txpin); // 软串口，调试打印
+edp_pkt *pkt;
+int pin = 0;
+int left_motor_en = 5;
+int right_motor_en = 6;
+
+int left_motor_go = 3;
+int right_motor_go = 4;
+
+int left_motor_back = 2;
+int right_motor_back = 7;
+/*
+* doCmdOk
+* 发送命令至模块，从回复中获取期待的关键字
+* keyword: 所期待的关键字
+* 成功找到关键字返回true，否则返回false
+*/
+
+bool doCmdOk(String data, char *keyword)
+{
+	bool result = false;
+	if (data != "")   //对于tcp连接命令，直接等待第二次回复
+	{
+		WIFI_UART.println(data);  //发送AT指令
+		DBG_UART.print("SEND: ");
+		DBG_UART.println(data);
+	}
+	if (data == "AT")   //检查模块存在
+		delay(2000);
+	else
+		while (!WIFI_UART.available());  // 等待模块回复
+
+	delay(200);
+	if (WIFI_UART.find(keyword))   //返回值判断
+	{
+		DBG_UART.println("do cmd OK");
+		result = true;
+	}
+	else
+	{
+		DBG_UART.println("do cmd ERROR");
+		result = false;
+	}
+	while (WIFI_UART.available()) WIFI_UART.read();   //清空串口接收缓存
+	delay(500); //指令时间间隔
+	return result;
+}
+
+
+void setup()
+{
+	pinMode(left_motor_en, OUTPUT);
+	pinMode(right_motor_en, OUTPUT);
+	pinMode(left_motor_go, OUTPUT);
+	pinMode(right_motor_go, OUTPUT);
+	pinMode(left_motor_back, OUTPUT);
+	pinMode(right_motor_back, OUTPUT);
+
+	analogWrite(left_motor_en, 112);
+	analogWrite(right_motor_en, 125);
+	char buf[100] = { 0 };
+	int tmp;
+	int pin = 0;
+	WIFI_UART.begin(_baudrate);
+	DBG_UART.begin(_baudrate);
+	WIFI_UART.setTimeout(3000);    //设置find超时时间
+	delay(3000);
+	DBG_UART.println("hello world!");
+
+	delay(2000);
+
+	while (!doCmdOk("AT+CWMODE=3", "OK"));            
+	while (!doCmdOk("AT+CWJAP=\"ck\",\"11111111\"", "OK"));
+	while (!doCmdOk("AT+CIPSTART=\"TCP\",\"183.230.40.39\",876", "CONNECT"));
+	while (!doCmdOk("AT+CIPMODE=1", "OK"));           //透传模式
+	while (!doCmdOk("AT+CIPSEND", ">"));              //开始发送
+}
+
+void loop()
+{
+	analogWrite(9, 0);
+	static int edp_connect = 0;
+	bool trigger = false;
+	edp_pkt rcv_pkt;
+	unsigned char pkt_type;
+	int i, tmp;
+	char num[10];
+
+	/* EDP 连接 */
+	if (!edp_connect)
+	{
+		while (WIFI_UART.available()) WIFI_UART.read(); //清空串口接收缓存
+		packetSend(packetConnect(ID, KEY));             //发送EPD连接包
+		while (!WIFI_UART.available());                 //等待EDP连接应答
+		if ((tmp = WIFI_UART.readBytes(rcv_pkt.data, sizeof(rcv_pkt.data))) > 0)
+		{
+			rcvDebug(rcv_pkt.data, tmp);
+			if (rcv_pkt.data[0] == 0x20 && rcv_pkt.data[2] == 0x00 && rcv_pkt.data[3] == 0x00)
+			{
+				edp_connect = 1;
+				DBG_UART.println("EDP connected.");
+			}
+			else
+				DBG_UART.println("EDP connect error.");
+		}
+		packetClear(&rcv_pkt);
+	};
+
+	char datastr[20];
+	char val[10];
+	char tem[20];
+	int va;
+	va = analogRead(pin);
+	char wd1[20];
+	sprintf(wd1, "%d", va);
+	readEdpPkt(&rcv_pkt);
+
+	pkt_type = rcv_pkt.data[0];
+	switch (pkt_type)
+	{
+	case CMDREQ:
+		char edp_command[50];
+		char edp_cmd_id[40];
+		long id_len, cmd_len, rm_len;
+		memset(edp_command, 0, sizeof(edp_command));
+		memset(edp_cmd_id, 0, sizeof(edp_cmd_id));
+		edpCommandReqParse(&rcv_pkt, edp_cmd_id, edp_command, &rm_len, &id_len, &cmd_len);
+		DBG_UART.print("rm_len: ");
+		DBG_UART.println(rm_len, DEC);
+		delay(10);
+		DBG_UART.print("id_len: ");
+		DBG_UART.println(id_len, DEC);
+		delay(10);
+		DBG_UART.print("cmd_len: ");
+		DBG_UART.println(cmd_len, DEC);
+		delay(10);
+		DBG_UART.print("id: ");
+		DBG_UART.println(edp_cmd_id);
+		delay(10);
+		DBG_UART.print("cmd: ");
+		DBG_UART.println(edp_command);
+		//数据处理与应用中EDP命令内容对应
+		//本例中格式为  datastream:[1/0] 
+		sscanf(edp_command, "%[^:]:%s", datastr, val);
+		if (atoi(val) == 1)//前进
+			forward();
+		delay(1000);
+		stop_car();
+		delay(1000);
+		if (atoi(val) == 3)   //后退
+			backward();
+		delay(1000);
+		stop_car();
+		delay(1000);
+		if (atoi(val) == 5)//左转
+		    left1();
+		delay(800);
+		stop_car();
+		delay(1000);
+		if (atoi(val) == 7)//右转
+			right1();
+		delay(800);
+		stop_car();
+		delay(1000);
+		if (atoi(val) == 9)
+		{
+			forward();
+			delay(6000);
+			right1();
+			delay(700);
+			forward();
+			delay(1000);
+			stop_car();
+			delay(2000);
+			backward();
+			delay(1000);
+			stop_car();
+			delay(1000);
+			right2();
+			delay(800);
+			backward();
+			delay(6000);
+			stop_car();
+			delay(1000);
+		}
+		if (atoi(val) == 11)//2号床
+		{            
+			forward();
+			delay(3500);
+			stop_car();
+			delay(1000);
+			right1();
+			delay(800);
+			forward();
+			delay(900);
+			stop_car();
+			delay(10000);
+			backward();
+			delay(800);
+			stop_car();
+			delay(1000);
+			right2();
+			delay(800);
+			backward();
+			delay(3500);
+			stop_car();
+			delay(1000);
+		}
+
+
+		if (atoi(val) == 13)//3号床
+		{  
+			forward();
+			delay(3000);
+			stop_car();
+			delay(2000);
+			left1();
+			delay(1000); 
+			forward();
+			delay(900);
+			stop_car();
+			delay(10000);
+			backward();
+			delay(700);
+			stop_car();
+			delay(1000);
+			left2();
+			delay(1000);
+			backward();
+			delay(3000);
+			stop_car();
+			delay(1000);
+
+		}
+
+		if (atoi(val) == 15)//4号床
+		{
+			forward();
+			delay(6000);
+			stop_car();
+			delay(5000);
+			backward();
+			delay(6000);
+			stop_car();
+			delay(1000);
+
+		}
+
+
+
+
+		break;
+	default:
+		DBG_UART.print("unknown type: ");
+		DBG_UART.println(pkt_type, HEX); packetSend(packetDataSaveTrans(NULL, datastr, wd1));
+		break;
+	}
+
+
+	if (rcv_pkt.len > 0)
+		packetClear(&rcv_pkt);
+	delay(150);
+}
+
+/*
+* readEdpPkt
+* 从串口缓存中读数据到接收缓存
+*/
+bool readEdpPkt(edp_pkt *p)
+{
+	int tmp;
+	if ((tmp = WIFI_UART.readBytes(p->data + p->len, sizeof(p->data))) > 0)
+	{
+		rcvDebug(p->data + p->len, tmp);
+		p->len += tmp;
+	}
+	return true;
+}
+
+/*
+* packetSend
+* 将待发数据发送至串口，并释放到动态分配的内存
+*/
+void packetSend(edp_pkt* pkt)
+{
+	if (pkt != NULL)
+	{
+		WIFI_UART.write(pkt->data, pkt->len);    //串口发送
+		WIFI_UART.flush();
+		free(pkt);              //回收内存
+	}
+}
+
+void rcvDebug(unsigned char *rcv, int len)
+{
+	int i;
+
+	DBG_UART.print("rcv len: ");
+	DBG_UART.println(len, DEC);
+	for (i = 0; i < len; i++)
+	{
+		DBG_UART.print(rcv[i], HEX);
+		DBG_UART.print(" ");
+	}
+	DBG_UART.println("");
+}
+
+
+void forward()
+{
+	digitalWrite(left_motor_go, HIGH);  //左电机前进
+	digitalWrite(left_motor_back, LOW);
+	digitalWrite(right_motor_go, HIGH);  //右电机前进
+	digitalWrite(right_motor_back, LOW);
+}
+//小车后退
+void backward()
+{
+	digitalWrite(left_motor_go, LOW);  //左电机反转
+	digitalWrite(left_motor_back, HIGH);
+	digitalWrite(right_motor_go, LOW);  //右电机反转
+	digitalWrite(right_motor_back, HIGH);
+}
+//小车左转
+
+void left1()
+{
+	digitalWrite(left_motor_go, LOW);  //左电机停止
+	digitalWrite(left_motor_back, LOW);
+	digitalWrite(right_motor_go, HIGH);  //右电机前进
+	digitalWrite(right_motor_back, LOW);
+}
+
+void left2()
+{
+	digitalWrite(left_motor_go, LOW);
+	digitalWrite(left_motor_back, LOW);
+	digitalWrite(right_motor_go, LOW);
+	digitalWrite(right_motor_back, HIGH);
+}
+
+//小车右转
+void right1()
+{
+	digitalWrite(left_motor_go, HIGH);  //左电机前进
+	digitalWrite(left_motor_back, LOW);
+	digitalWrite(right_motor_go, LOW);  //右电机停止
+	digitalWrite(right_motor_back, LOW);
+}
+
+void right2()
+{
+	digitalWrite(left_motor_go, LOW);  //左电机前进
+	digitalWrite(left_motor_back, HIGH);
+	digitalWrite(right_motor_go, LOW);  //右电机停止
+	digitalWrite(right_motor_back, LOW);
+}
+//停车
+void stop_car()
+{
+	digitalWrite(left_motor_go, LOW);  //左电机停止
+	digitalWrite(left_motor_back, LOW);
+	digitalWrite(right_motor_go, LOW);  //右电机停止
+	digitalWrite(right_motor_back, LOW);
+}
